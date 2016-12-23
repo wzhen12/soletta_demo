@@ -1,0 +1,457 @@
+find-deps = $(foreach dep,$($(1)-deps),$($(filter %$(dep),$(modules))-out) $($(dep)-out))
+find-obj-deps = $(foreach dep,$($(1)-deps),$($(dep)-objs))
+
+oic-gens :=
+
+gen-artifact = \
+	$(foreach json,$(filter %.json,$(2)), \
+		$(eval $(json)-src   := $(subst $(top_srcdir)src,$(build_stagedir),$(subst .json,-gen.c,$(json)))) \
+		$(if $(filter-out "",$(3)), \
+			$(eval $(json)-hdr   := $(subst $(top_srcdir)src/,$(build_stagedir),$(subst .json,-gen.h,$(json)))) \
+			$(eval $(json)-desc  := $(subst $(top_srcdir)src/,$(build_stagedir),$(json))) \
+			$(eval $(3)          := $(addprefix -I,$(dir $($(json)-src)))) \
+		, \
+			$(eval $(json)-hdr   := $(build_includedir)sol-$($(4)-type)/$(notdir $(subst .json,.h,$(json)))) \
+			$(eval $(json)-namespace := sol-$($(4)-type)) \
+			$(eval $(json)-desc  := $(build_descdir)$(1).json) \
+			$(eval all-mod-descs += $($(json)-desc)) \
+		) \
+		$(eval all-gen-hdrs  += $($(json)-hdr)) \
+		$(eval all-gens      += $(json)) \
+		$(eval $(4)-gens     += $(json)) \
+		$(eval $(4)-gen-cflags+= $(addprefix -I,$(dir $($(json)-src)))) \
+	) \
+
+extra-headers = \
+	$(foreach hdr,$(1), \
+		$(if $(filter %.h.in,$(hdr)), \
+			$(eval gen-file      := $(subst .h.in,.h,$(hdr))) \
+			$(eval $(hdr)-dest   := $(build_includedir)$(notdir $(gen-file))) \
+			$(eval all-templates += $(hdr)) \
+			$(eval export all-hdr       += $($(hdr)-dest)) \
+		, \
+			$(eval $(hdr)-dest  := $(build_includedir)$(notdir $(hdr))) \
+			$(eval all-dest-hdr += $($(hdr)-dest)) \
+			$(eval export all-hdr += $(hdr)) \
+		) \
+	) \
+
+private-headers = \
+	$(foreach hdr,$(1), \
+		$(if $(filter %.h.in,$(hdr)), \
+			$(eval gen-file      := $(subst .h.in,.h,$(hdr))) \
+			$(eval $(hdr)-dest   := $(build_stagedir)include/$(2)/$(notdir $(gen-file))) \
+			$(eval all-templates += $(hdr)) \
+		, \
+			$(eval $(hdr)-dest  := $(build_stagedir)include/$(2)/$(notdir $(hdr))) \
+			$(eval all-priv-hdr += $(hdr)) \
+			$(eval all-dest-hdr += $($(hdr)-dest)) \
+		) \
+	) \
+
+artifact-path = $(foreach curr,$(1), \
+			$(if $(wildcard $(top_srcdir)$(2)/$(subst .o,.c,$(curr))), \
+				$(eval intree := y), \
+				$(eval intree := $(if $(filter $(abspath $(top_srcdir))%,$(abspath $(curr))),y,n)) \
+			) \
+			$(eval abs_path := $(if $(filter /%,$(curr)),y,n)) \
+			$(if $(filter y,$(intree)), \
+				$(if $(filter y,$(abs_path)), \
+					$(eval cpath := $(subst $(abspath $(top_srcdir))/,$(top_srcdir),$(curr))) \
+				, \
+					$(eval normalized := $(abspath $(addprefix $(2),$(curr)))) \
+					$(eval cpath := $(subst $(abspath $(top_srcdir))/,$(top_srcdir),$(normalized))) \
+				) \
+				$(eval dest-obj := $(subst $(top_srcdir)src/,$(build_stagedir),$(cpath))) \
+			, \
+				$(eval cpath := $(curr)) \
+				$(eval dest-obj := $(addprefix $(build_stagedir),$(cpath))) \
+			) \
+			$(eval $(3) += $(cpath)) \
+			$(eval $(cpath)-dest-obj := $(dest-obj)) \
+		 ) \
+
+parse-common-module = \
+	$(eval artifacts :=) \
+	$(call artifact-path,$(obj-$(1)-$(3)),$(2),artifacts) \
+	$(eval obj-$(1)-$(3) :=) \
+	$(eval all-artifacts += $(artifacts)) \
+	$(eval mod-objs     := $(filter %.o,$(artifacts))) \
+	$(eval $(4)-cflags  := $(obj-$(1)-y-extra-cflags)) \
+	$(eval $(4)-cflags  += $(obj-$(1)-m-extra-cflags)) \
+	$(eval $(4)-ldflags := $(obj-$(1)-y-extra-ldflags)) \
+	$(eval $(4)-ldflags += $(obj-$(1)-m-extra-ldflags)) \
+	$(if $(obj-$(1)-private-headers),$(call private-headers,$(obj-$(1)-private-headers),$(1))) \
+	$(eval $(4)-bs      := $(addprefix $(2),Makefile)) \
+	$(eval $(4)-bs      += $(if $(wildcard $(2)/Kconfig),$(addprefix $(2),Kconfig))) \
+	$(eval $(4)-hdrs    := $(filter %.h,$(artifacts))) \
+	$(eval $(5)         := $(if $(obj-$(1)-$(3)-type),$(obj-$(1)-$(3)-type),$(mod-type))) \
+	$(eval $(4)-type    := $($(5))) \
+	$(call gen-artifact,$(1),$(filter %.json,$(artifacts)),"",$(4)) \
+	$(if $(obj-$(1)-$(3)-oic), \
+		$(eval oic-gens             += $(dir $(2))) \
+		$(eval oic-gens-$(dir $(2)) := $(dir $(2)) $(obj-$(1)-$(3)-oic-dirs)) \
+	) \
+	$(foreach obj,$(mod-objs), \
+		$(eval dest-obj        := $($(obj)-dest-obj)) \
+		$(eval $(dest-obj)-src := $(subst .o,.c,$(obj))) \
+		$(eval $(4)-srcs       := $($(dest-obj)-src)) \
+		$(eval $(4)-objs       += $(dest-obj)) \
+		$(eval $(dest-obj)-module := $(if $($(dest-obj)-module),$($(dest-obj)-module),$(4))) \
+		$(eval all-objs        += $(filter-out $(all-objs),$(dest-obj))) \
+	)\
+	$(eval $(4)-deps    := $(subst .mod,,$(obj-$(1)-$(3)-deps)))
+
+parse-builtin-module = \
+	$(call parse-common-module,$(1),$(2),y,$(3),curr-mod-type) \
+	$(eval builtin-cflags      += $($(3)-cflags)) \
+	$(eval builtin-ldflags     += $($(3)-ldflags)) \
+	$(eval builtin-objs        += $($(3)-objs)) \
+	$(eval export builtins-$(curr-mod-type) += $(1)) \
+
+parse-mod-output = \
+	$(eval out-prefix := $(build_modulesdir)$($(3)-type)) \
+	$(eval $(3)-out   := $(out-prefix)/$(1).so) \
+	$(eval mod-so     += $(3)) \
+
+external-module-flags := -DSOL_FLOW_NODE_TYPE_MODULE_EXTERNAL=1 -DSOL_PLATFORM_LINUX_MICRO_MODULE_EXTERNAL=1 \
+		-DSOL_PIN_MUX_MODULE_EXTERNAL=1 -DSOL_FLOW_METATYPE_MODULE_EXTERNAL=1 -DSOL_UPDATE_MODULE_EXTERNAL=1
+
+parse-mod-module = \
+	$(call parse-common-module,$(1),$(2),m,$(3),curr-mod-type) \
+	$(eval $(3)-external-flags := $(external-module-flags)) \
+	$(call parse-mod-output,$(1),$(2),$(3)) \
+	$(eval modules-out += $($(3)-out)) \
+	$(eval export modules-$(curr-mod-type) += $(1)) \
+
+parse-bin = \
+	$(eval bin-$(1)-srcs := $(addprefix $(2),$(bin-$(1)-y))) \
+	$(eval bin-$(1)-out  := $(addprefix $(build_bindir),$(1))) \
+	$(eval bin-$(1)-cflags := $(bin-$(1)-y-extra-cflags)) \
+	$(eval bin-$(1)-ldflags := $(bin-$(1)-y-extra-ldflags)) \
+	$(eval $(1)-deps     := $(subst .mod,,$(bin-$(1)-y-deps))) \
+	$(eval bins-out      += $(bin-$(1)-out)) \
+
+define install-resource
+$(2): $(1)
+	$(Q)echo "    "INST"   "$(1)
+	$(Q)$(MKDIR) -p $(dir $(2))
+	$(Q)$(CP) $(1) $(2)
+endef
+
+parse-data = \
+	$(if $(data-$(1)-dir), \
+		$(eval data-$(1)-dir := $(addprefix $(build_datadir),$(data-$(1)-dir))), \
+		$(eval data-$(1)-dir := $(build_datadir)) \
+	) \
+	$(foreach file,$(data-$(1)-files), \
+		$(eval $(call install-resource,$(2)/$(file),$(data-$(1)-dir)/$(file))) \
+		$(eval all-data += $(data-$(1)-dir)/$(file)) \
+	) \
+
+parse-test = \
+	$(eval test-$(1)-srcs := $(addprefix $(2),$($(3)-$(1)-y))) \
+	$(eval test-$(1)-out  := $(addprefix $(subst $(top_srcdir)src/,$(build_stagedir),$(2)),$(1))) \
+	$(eval test-$(1)-cflags := $($(3)-$(1)-y-extra-cflags)) \
+	$(eval test-$(1)-ldflags := $($(3)-$(1)-y-extra-ldflags)) \
+	$(eval $(1)-deps      := $(subst .mod,,$($(3)-$(1)-y-deps))) \
+	$(eval tests-out      += $(test-$(1)-out)) \
+
+gen-fbp-common = \
+	$(eval $(1)-src     := $(subst $(top_srcdir)src/,$(build_stagedir),$(subst .fbp,-gen.c,$(1)))) \
+	$(eval all-fbp-gens += $(1)) \
+
+gen-fbp-artifact = \
+	$(foreach fbp,$(filter %.fbp,$(2)), \
+		$(call gen-fbp-common,$(fbp)) \
+		$(eval $(fbp)-conffile  := $(4)) \
+		$(eval $(3)             += $($(fbp)-src)) \
+		$(eval sample-$(1)-gens += $(fbp)) \
+	) \
+
+parse-sample = \
+	$(eval sample-$(1)-srcs := $(addprefix $(2),$(filter-out %.fbp,$(sample-$(1)-y)))) \
+	$(eval artifacts        := $(addprefix $(2),$(filter %.fbp,$(sample-$(1)-y)))) \
+	$(eval conffile         := $(addprefix $(2),$(filter %.json,$(sample-$(1)-y-conffile)))) \
+	$(call gen-artifact,$(1),$(addprefix $(2),$(filter %.json,$(sample-$(1)-y))),sample-$(1)-includedir,$(1)) \
+	$(call gen-fbp-artifact,$(1),$(artifacts),sample-$(1)-srcs,$(conffile)) \
+	$(if $(filter %.o,$(sample-$(1)-srcs)), \
+		$(eval sample-$(1)-out  := $(subst $(top_srcdir)src/,$(build_stagedir),$(filter %.o,$(sample-$(1)-srcs)))) \
+	, \
+		$(eval sample-$(1)-out  := $(subst $(top_srcdir)src/,$(build_stagedir),$(addprefix $(2),$(1)))) \
+	) \
+	$(eval sample-$(1)-srcs := $(subst .o,.c,$(sample-$(1)-srcs))) \
+	$(eval sample-$(1)-srcs += $(sample-$(1)-y-extra)) \
+	$(eval sample-$(1)-cflags := $(sample-$(1)-y-cflags)) \
+	$(eval $(1)-deps        := $(subst .mod,,$(sample-$(1)-y-deps))) \
+	$(eval samples-out      += $(sample-$(1)-out)) \
+	$(eval $(1)-dir         += $(2)) \
+
+parse-warnings = \
+	$(if $(2), \
+		$(eval all-warnings        += $(1)bs-warnings) \
+		$(eval $(1)bs-warnings-msg += $(2)) \
+	) \
+
+clean-control = $(eval headers-y:=) $(eval obj-y:=) $(eval obj-m:=) $(eval data-y:=) $(eval data-m:=) $(eval bin-y:=) \
+		$(eval test-y:=) $(eval test-internal-y:=) $(eval sample-y:=) $(eval headers-m:=) \
+		$(eval warning-msg:=) $(eval warning-msg-y:=) $(eval warning-msg-m:=) \
+		$(eval requires-private-y:=) $(eval mod-type:=)
+
+inc-subdirs = \
+	$(foreach subdir,$(SUBDIRS), $(clean-control) \
+		$(eval -include $(subdir)Makefile) \
+		$(eval warnings             := $(warning-msg) $(warning-msg-y) $(warning-msg-m)) \
+		$(call extra-headers,$(addprefix $(subdir),$(headers-y))) \
+		$(call extra-headers,$(addprefix $(subdir),$(headers-m))) \
+		$(call parse-warnings,$(subdir),$(warnings)) \
+		$(eval curr-builtins        := $(subst .mod,,$(filter %.mod,$(obj-y)))) \
+		$(foreach buin,$(curr-builtins), \
+			$(eval type := $(obj-$(buin)-y-type)) \
+			$(eval mod-id := $(type)/$(buin)) \
+			$(call parse-builtin-module,$(buin),$(subdir),$(mod-id)) \
+			$(eval builtins += $(mod-id)) \
+		) \
+		$(eval curr-modules        := $(subst .mod,,$(filter %.mod,$(obj-m)))) \
+		$(foreach mod,$(curr-modules), \
+			$(eval type := $(obj-$(mod)-m-type)) \
+			$(eval mod-id := $(type)/$(mod)) \
+			$(call parse-mod-module,$(mod),$(subdir),$(mod-id)) \
+			$(eval modules += $(mod-id)) \
+		) \
+		$(eval curr-bins := $(bin-y)) \
+		$(eval bins += $(curr-bins)) \
+		$(foreach bin,$(curr-bins), \
+			$(call parse-bin,$(bin),$(subdir)) \
+		) \
+		$(eval tests += $(test-y)) \
+		$(foreach test,$(test-y), \
+			$(call parse-test,$(test),$(subdir),test) \
+		) \
+		$(eval tests-internal += $(test-internal-y)) \
+		$(foreach test,$(test-internal-y), \
+			$(call parse-test,$(test),$(subdir),test-internal) \
+		) \
+		$(eval samples += $(sample-y)) \
+		$(foreach sample,$(sample-y), \
+			$(call parse-sample,$(sample),$(subdir)) \
+		) \
+		$(eval requires-private += $(requires-private-y)) \
+		$(eval curr-data := $(data-y) $(data-m)) \
+		$(foreach data,$(curr-data), \
+			$(call parse-data,$(data),$(subdir)) \
+		) \
+		$(clean-control) \
+	) \
+	$(eval requires-private := $(sort $(requires-private))) \
+	export requires-private
+
+extra-bins = \
+	$(foreach bin,$(EXTRA_BINS), \
+		$(eval $(bin)-dest  := $(build_bindir)$(notdir $(bin))) \
+		$(eval all-dest-bin += $($(bin)-dest)) \
+	) \
+
+parse-tests-fbp-bin = \
+	$(foreach fbp,$(tests-fbp-bin), \
+		$(eval curr := $(subst $(abspath $(top_srcdir))/,$(top_srcdir),$(fbp))) \
+		$(call gen-fbp-common,$(curr)) \
+		$(eval $(curr)-out := $(subst -gen.c,,$($(curr)-src))) \
+		$(eval all-tests-fbp-bin += $(curr)) \
+		$(eval all-tests-fbp-bin-out += $($(curr)-out)) \
+	) \
+
+ifneq ($(M),)
+SUBDIRS += $(M)/
+endif # $(M)
+
+$(eval $(call inc-subdirs))
+$(eval $(call extra-bins))
+$(eval $(call parse-tests-fbp-bin))
+
+PRE_GEN += $(all-gen-hdrs) $(all-dest-hdr) $(all-dest-bin) $(all-data)
+
+define make-warning
+$(1):
+	$(Q)echo "     [!]   "$($(1)-msg)
+
+all: $(1)
+PHONY += $(1)
+endef
+$(foreach wrn,$(all-warnings),$(eval $(call make-warning,$(wrn))))
+
+define make-warning-header
+$(all-warnings): warning-header
+warning-header: default_target
+	$(Q)echo "*** ATTENTION:"
+PHONY += warning-header
+endef
+$(if $(all-warnings),$(eval $(call make-warning-header,$(wrn))))
+
+define make-extra-header
+$($(1)-dest): $(1)
+	$(Q)echo "    "INST"   "$$@
+	$(Q)$(MKDIR) -p $(dir $($(1)-dest))
+	$(Q)$(CP) $(1) $($(1)-dest)
+endef
+$(foreach hdr,$(all-hdr),$(eval $(call make-extra-header,$(hdr))))
+$(foreach hdr,$(all-priv-hdr),$(eval $(call make-extra-header,$(hdr))))
+
+define make-extra-bin
+$($(1)-dest): $(1)
+	$(Q)echo "    "INST"   "$$@
+	$(Q)$(MKDIR) -p $(dir $($(1)-dest))
+	$(Q)$(INSTALL) -m755 $(1) $($(1)-dest)
+endef
+$(foreach bin,$(EXTRA_BINS),$(eval $(call make-extra-bin,$(bin))))
+
+define make-bin
+$(bin-$(1)-out): $(SOL_LIB_OUTPUT) $(bin-$(1)-srcs) $(call find-deps,$(1))
+	$(Q)echo "     "BIN"   "$$@
+	$(Q)$(MKDIR) -p $(dir $(bin-$(1)-out))
+	$(Q)$(TARGETCC) $(BIN_CFLAGS) $(bin-$(1)-cflags) $(filter-out %.h,$(bin-$(1)-srcs)) -o $(bin-$(1)-out) $(BIN_LDFLAGS) $(bin-$(1)-ldflags) $(sort $(builtin-ldflags))
+endef
+$(foreach curr,$(bins),$(eval $(call make-bin,$(curr))))
+
+sample-out = $(if $(filter %.o,$(sample-$(1)-out)), -c -o $(sample-$(1)-out),-o $(sample-$(1)-out))
+sample-src = $(filter-out %.json,$(filter-out %.h,$(sample-$(1)-srcs)))
+
+#TODO: in the future declare deps individually for samples and remove this $(modules-out) dependency here (for every module)
+define make-sample
+$(sample-$(1)-out): $(SOL_LIB_OUTPUT) $(modules-out) $(sample-$(1)-srcs) $(call find-deps,$(1)) $(addprefix $($(1)-dir),$(filter %.fbp,$($(1)-deps))) $($(filter %.json,$(sample-$(1)-srcs))-hdr)
+	$(Q)echo "     "SMP"   "$$@
+	$(Q)$(MKDIR) -p $(dir $(sample-$(1)-out))
+	$(Q)$(TARGETCC) $(SAMPLE_CFLAGS) $(sample-$(1)-cflags) $(sample-$(1)-includedir) $(sample-src) \
+	$(call find-deps,$(1)) $(sample-out) $(SAMPLE_LDFLAGS) \
+	$(sample-$(1)-ldflags) $(sort $(builtin-ldflags))
+endef
+$(foreach sample,$(samples),$(eval $(call make-sample,$(sample))))
+
+ifeq (y,$(STATIC_LIBRARY))
+use-builtin-ldflags = $(sort $(builtin-ldflags))
+use-builtin-cflags = $(sort $(builtin-cflags))
+endif
+
+define make-test-fbp-bin
+$($(1)-out): $(SOL_LIB_OUTPUT) $($(1)-src) $(modules-out)
+	$(Q)echo "     " CC"   "$$@
+	$(Q)$(MKDIR) -p $(dir $($(1)-out))
+	$(Q)$(TARGETCC) $(SAMPLE_CFLAGS) $($(1)-CFLAGS) $(use-builtin-cflags) $($(1)-src) $($(1)-extra) -o $($(1)-out) \
+	$(SAMPLE_LDFLAGS) $($(1)-LDFLAGS) $(use-builtin-ldflags)
+endef
+$(foreach test-fbp-bin,$(all-tests-fbp-bin),$(eval $(call make-test-fbp-bin,$(test-fbp-bin))))
+
+define make-test
+$(test-$(1)-out): $(SOL_LIB_OUTPUT) $(test-$(1)-srcs) $(call find-deps,$(1))
+	$(Q)echo "     "TST"   "$$@
+	$(Q)$(MKDIR) -p $(dir $(test-$(1)-out))
+	$(Q)$(TARGETCC) $(TEST_CFLAGS) $(test-$(1)-cflags) $(use-builtin-cflags) $(filter-out %.h,$(test-$(1)-srcs)) \
+	-o $$@ $(TEST_LDFLAGS) $(test-$(1)-ldflags) $(use-builtin-ldflags)
+endef
+$(foreach curr,$(tests),$(eval $(call make-test,$(curr))))
+
+internal-deps = $(foreach curr,$(1),$(filter %$(curr),$(builtin-objs)))
+
+define make-test-internal
+$(test-$(1)-out): $(SOL_LIB_OUTPUT) $(test-$(1)-srcs) $(call find-deps,$(1))
+	$(Q)echo "     "TST"   "$$@
+	$(Q)$(TARGETCC) $(TEST_CFLAGS) $(test-$(1)-cflags) $(filter-out %.h,$(test-$(1)-srcs)) \
+	$(call internal-deps,$($(1)-deps)) $(call find-deps,$(1)) -o $$@ $(sort $(builtin-ldflags)) $(TEST_LDFLAGS) $(test-$(1)-ldflags)
+endef
+$(foreach curr,$(tests-internal),$(eval $(call make-test-internal,$(curr))))
+
+find-gen-hdrs = $(foreach gen,$($(2)-gens),$($(gen)-hdr))
+
+define make-object
+$(1): $($(1)-src) $(1).dep
+	$(Q)echo "      "CC"   "$$@
+	$(Q)$(MKDIR) -p $(dir $(1))
+	$(Q)$(TARGETCC) $(OBJ_CFLAGS) $($(2)-gen-cflags) $(sort $($(2)-cflags)) $($(1)-src) -c -o $(1) $(3)
+
+$(1).dep: $($(1)-src) $(all-hdr) $(find-gen-hdrs) $(call find-obj-deps,$(2)) $(all-dest-hdr) $(KCONFIG_CONFIG) $(HEADER_GEN) $(KCONFIG_AUTOHEADER)
+	$(Q)$(MKDIR) -p $(dir $(1))
+	$(Q)$(TARGETCC) $(OBJ_CFLAGS) $($(2)-gen-cflags) $(sort $($(2)-cflags)) -MM -MG $($(1)-src) -MT "$(1)" > $(1).dep
+endef
+$(foreach obj,$(sort $(all-objs)), \
+	$(eval $(call make-object,$(obj),$($(obj)-module),$($($(obj)-module)-external-flags))) \
+)
+
+define make-mod-so
+$($(1)-out): $(SOL_LIB_OUTPUT) $(SOL_SHARED_AR) $($(1)-objs) $(call find-deps,$(1)) $($(1)-bs)
+	$(Q)echo "     "MOD"   "$$@
+	$(Q)$(MKDIR) -p $(dir $($(1)-out))
+	$(Q)$(TARGETCC) $(MOD_CFLAGS) $(sort $($(1)-cflags)) $($(1)-objs) \
+		-shared -o $($(1)-out) $(LINKED_OBJS_LDFLAGS) $(sort $($(1)-ldflags))
+endef
+$(foreach curr,$(mod-so),$(eval $(call make-mod-so,$(curr))))
+
+$(SOL_SHARED_AR): $(builtin-objs)
+	$(Q)echo "      "AR"   "$(@)
+	$(Q)$(MKDIR) -p $(dir $(SOL_SHARED_AR))
+	$(Q)$(TARGETAR) $(TARGET_ARFLAGS) $(@) $(filter $(build_stagedir)shared/%,$(builtin-objs))
+
+$(SOL_LIB_AR): $(SOL_SHARED_AR) $(all-objs)
+	$(Q)echo "      "AR"   "$(@)
+	$(Q)$(MKDIR) -p $(dir $(SOL_LIB_AR))
+	$(Q)$(TARGETAR) $(TARGET_ARFLAGS) $(@) $(all-objs)
+
+$(SOL_LIB_SO): $(SOL_SHARED_AR)
+	$(Q)echo "      "LD"   "$(@)
+	$(Q)$(MKDIR) -p $(dir $(SOL_LIB_SO))
+	$(Q)$(TARGETCC) -shared $(sort $(filter-out $(build_stagedir)shared/%,$(builtin-objs))) $(sort $(builtin-ldflags)) $(LIB_LDFLAGS) -o $(@).$(VERSION)
+	$(Q)$(LN) -fs $(notdir $(@).$(VERSION)) $(@).$(VERSION_MAJOR)
+	$(Q)$(LN) -fs $(notdir $(@).$(VERSION)) $(@)
+
+# generators
+define make-oic-gen
+$(addprefix $(addprefix $(1), $(notdir $(abspath $(1)))), .json): $(FLOW_OIC_GEN_SCRIPT)
+	$(Q)echo "     "GEN"   "$$@
+	$(Q)$(PYTHON) $(FLOW_OIC_GEN_SCRIPT) \
+		--quiet \
+		--node-type-json=$(addprefix $(addprefix $(1), $(notdir $(abspath $(1)))), .json) \
+		--node-type-impl=$(addprefix $(addprefix $(1), $(notdir $(abspath $(1)))), .c) \
+		--node-type-gen-c=$(addprefix $(notdir $(abspath $(1))), -gen.c) \
+		--node-type-gen-h=$(addprefix sol-flow/, $(addprefix $(notdir $(abspath $(1))), .h)) \
+		$(2)
+	$(eval cleanup-files += $(addprefix $(addprefix $(1), $(notdir $(abspath $(1)))), .json) $(addprefix $(addprefix $(1), $(notdir $(abspath $(1)))), .c))
+$(addprefix $(addprefix $(1), $(notdir $(abspath $(1)))), .c): $(addprefix $(addprefix $(1), $(notdir $(abspath $(1)))), .json)
+$(addprefix $(addprefix $(1), $(notdir $(abspath $(1)))), .h): $(addprefix $(addprefix $(1), $(notdir $(abspath $(1)))), .json)
+endef
+$(foreach gen,$(sort $(oic-gens)),$(eval $(call make-oic-gen,$(gen),$(oic-gens-$(gen)))))
+
+define make-gen
+$($(1)-hdr) $($(1)-src) $($(1)-desc): $(1) $(NODE_TYPE_GEN_SCRIPT)
+	$(Q)echo "     "GEN"   "$$@
+	$(Q)$(MKDIR) -p $(dir $($(1)-hdr))
+	$(Q)$(MKDIR) -p $(dir $($(1)-src))
+	$(Q)$(MKDIR) -p $(dir $($(1)-desc))
+	$(Q)$(PYTHON) $(NODE_TYPE_GEN_SCRIPT) --prefix=sol-flow-node-type --namespace=$($(1)-namespace) \
+		--genspec-schema=$(NODE_TYPE_SCHEMA) $(1) $($(1)-hdr) $($(1)-src) $($(1)-desc)
+endef
+$(foreach gen,$(sort $(all-gens)),$(eval $(call make-gen,$(gen))))
+
+define make-template-gen
+$($(1)-dest): $(1) $(KCONFIG_CONFIG) $(MAKEFILE_GEN)
+	$(Q)echo "     "GEN"   "$$@
+	$(Q)$(MKDIR) -p $(dir $($(1)-dest))
+	$(Q)$(PYTHON) $(TEMPLATE_SCRIPT) --context-files $(KCONFIG_CONFIG) $(MAKEFILE_GEN) \
+		--template=$(1) --output=$($(1)-dest)
+endef
+$(foreach tpl,$(all-templates),$(eval $(call make-template-gen,$(tpl))))
+
+define make-fbp-gen
+$($(1)-src): $(1) $(SOL_FBP_GENERATOR_BIN)
+	$(Q)echo "     "GEN"   "$$@
+	$(Q)$(MKDIR) -p $(dir $($(1)-src))
+	$(Q)$(SOL_FBP_GENERATOR_BIN) -j $(build_descdir) $(1) $($(1)-src) $(if $(filter-out "",$($(1)-conffile)), -c $($(1)-conffile))
+endef
+$(foreach gen,$(all-fbp-gens),$(eval $(call make-fbp-gen,$(gen))))
+
+$(eval $(call install-resource,$(NODE_TYPE_SCHEMA),$(NODE_TYPE_SCHEMA_DEST)))
+$(eval $(call install-resource,$(BOARD_DETECT),$(BOARD_DETECT_DEST)))
+$(eval $(call install-resource,$(GDB_AUTOLOAD_PY),$(GDB_AUTOLOAD_PY_DEST)))
+
+$(KCONFIG_AUTOHEADER): $(DEPENDENCY_CACHE) $(KCONFIG_CONFIG) $(obj)/conf
+	$(Q)echo "     "GEN"   "$@
+	$(Q)mkdir -p $(KCONFIG_INCLUDE)config $(KCONFIG_INCLUDE)generated
+	$(Q)$(obj)/conf -s --silentoldconfig Kconfig

@@ -1,0 +1,259 @@
+tests: $(SOL_LIB_OUTPUT) $(tests-out) $(modules-out)
+
+CHECK_DEPS := tests
+ifneq ($(USE_NODEJS),)
+# Disabling it for a while since these checks are randomly failing
+# on most builds. As soon as it's solved this should be reverted.
+# CHECK_DEPS += check-bindings-nodejs
+endif
+
+check: $(CHECK_DEPS)
+	$(Q)$(PYTHON) $(TEST_SUITE_RUN_SCRIPT) --tests="$(tests-out)"
+
+PHONY += tests check
+
+#GLIB cflags and ldflags are used here due glib-integration that includes glib headers directly
+check-cpp: $(SOL_LIB_OUTPUT) $(HEADERS_CC)
+	$(HOSTCPP) -std=gnu++11 -Wno-attributes $(GLIB_CFLAGS)  $(addprefix -I,$(HEADERDIRS)) $(HEADERS_CC) $(SOL_LIB_OUTPUT) $(GLIB_LDFLAGS) -o $(build_stagedir)bin/cpp/headers
+
+PHONY += check-cpp
+
+ifeq (y,$(FBP_RUNNER))
+check-fbp: $(SOL_LIB_OUTPUT) $(SOL_FBP_RUNNER_BIN) $(modules-out) $(PRE_GEN) gen-aliases
+	$(Q)$(PYTHON) $(TEST_FBP_SCRIPT) --runner="$(abspath $(SOL_FBP_RUNNER_BIN))"
+else
+check-fbp:
+	$(Q)echo "Could not run check-fbp, sol-fbp-runner is not enabled, enable it and run "
+	$(Q)echo "check-fbp target again"
+endif
+
+ifeq (y, $(FBP_GENERATOR))
+check-fbp-bin: $(SOL_LIB_OUTPUT) $(SOL_FBP_GENERATOR_BIN) $(modules-out) $(all-tests-fbp-bin-out) $(PRE_GEN) gen-aliases
+	$(Q)$(PYTHON) $(TEST_FBP_SCRIPT) --compiled --compiled-dir $(abspath $(build_stagedir)test-fbp/) \
+		--skip SKIP_SIMPLE SKIP_COMPILE SKIP_VALGRIND $(TEST_FBP_SCRIPT_SKIP_EXTRA)
+else
+check-fbp-bin:
+	$(Q)echo "Could not run check-fbp-bin, sol-fbp-generator is not enabled, enable it and run "
+	$(Q)echo "check-fbp-bin target again"
+endif
+
+PHONY += check-fbp check-fbp-bin
+
+ifeq (y,$(HAVE_VALGRIND))
+check-valgrind: $(SOL_LIB_OUTPUT) $(tests-out)
+	$(Q)$(PYTHON) $(TEST_SUITE_RUN_SCRIPT) --tests="$(tests-out)" \
+		--valgrind=$(VALGRIND) --valgrind-supp=$(abspath $(TEST_VALGRIND_SUPP))
+
+check-fbp-valgrind: $(SOL_LIB_OUTPUT) $(bins-out) $(modules-out)
+	$(Q)$(PYTHON) $(TEST_FBP_SCRIPT) --runner="$(abspath $(SOL_FBP_RUNNER_BIN))" --valgrind="$(VALGRIND)" --valgrind-supp="$(abspath $(TEST_VALGRIND_SUPP))"
+
+check-fbp-bin-valgrind: $(SOL_LIB_OUTPUT) $(bins-out) $(modules-out) $(all-tests-fbp-bin-out)
+	$(Q)$(PYTHON) $(TEST_FBP_SCRIPT) --compiled --compiled-dir $(abspath $(build_stagedir)test-fbp/) \
+		--skip SKIP_SIMPLE SKIP_COMPILE SKIP_VALGRIND $(TEST_FBP_SCRIPT_SKIP_EXTRA) --valgrind="$(VALGRIND)" --valgrind-supp="$(abspath $(TEST_VALGRIND_SUPP))"
+else
+check-valgrind:
+	$(Q)echo "No such valgrind installation: $(VALGRIND), either make sure your valgrind"
+	$(Q)echo " installation is correct or provide a valid VALGRIND= variable"
+	$(Q)echo "If you've just installed it, run: make reconf"
+
+check-fbp-valgrind: check-valgrind
+check-fbp-bin-valgrind: check-valgrind
+endif # HAVE_VALGRIND
+
+check-api:
+	$(Q)$(PYTHON) $(TEST_API_SCRIPT) --src_dir $(top_srcdir)src --version_script $(SCRIPTDIR)libsoletta.sym
+
+PHONY += check-valgrind check-fbp-valgrind check-fbp-bin-valgrind check-api
+
+ifneq (,$(LCOV))
+run-coverage: check check-fbp
+	$(Q)$(MKDIR) -p $(coveragedir)
+	$(Q)$(LCOV) --capture --directory $(top_srcdir) --output-file $(coveragedir)coverage.info
+	$(Q)$(LCOV) --extract $(coveragedir)coverage.info *\/src\/* --output-file $(coveragedir)coverage.info
+	$(Q)$(LCOV) --remove $(coveragedir)coverage.info *thirdparty* --output-file $(coveragedir)coverage.info
+	$(Q)$(MV) *.gcda $(build_bindir)
+	$(Q)$(GENHTML) coverage/coverage.info --output-directory coverage/
+
+coverage: clean
+	$(Q)$(RM) -Rf $(coveragedir)
+	$(Q)$(MAKE) -f $(top_srcdir)Makefile run-coverage
+else
+coverage:
+	$(Q)echo "No such lcov installation, check your system and run it again."
+	$(Q)echo "If you've just installed it, run: make reconf"
+endif
+
+PHONY += run-coverage coverage
+
+# This dummy module is used just to make sure scripts node-type-gen
+# and node-type-stub-gen are working fine. It should build the module
+# sketch fine. Dummy module exercises all possible options and ports
+# data types.
+
+check-stub: $(SOL_LIB_OUTPUT) $(NODE_TYPE_STUB_GEN_SCRIPT) $(NODE_TYPE_SCHEMA) $(NODE_TYPE_GEN_SCRIPT) $(NODE_TYPE_STUB_GEN_TEST)
+	$(Q)$(MKDIR) -p $(NODE_TYPE_STUB_GEN_DIR)
+	$(Q)$(PYTHON) $(NODE_TYPE_GEN_SCRIPT) --prefix=sol-flow-node-type \
+		--genspec-schema=$(NODE_TYPE_SCHEMA) $(NODE_TYPE_STUB_GEN_TEST) \
+		$(NODE_TYPE_STUB_GEN_DIR)dummy.h \
+		$(NODE_TYPE_STUB_GEN_DIR)dummy-gen.c \
+		$(NODE_TYPE_STUB_GEN_DIR)dummy.json
+	$(Q)$(PYTHON) $(NODE_TYPE_STUB_GEN_SCRIPT) --prefix=sol-flow-node-type \
+		--force=yes $(NODE_TYPE_STUB_GEN_DIR)dummy.c \
+		$(NODE_TYPE_STUB_GEN_TEST)
+	$(Q)echo "Stub generator is good"
+
+# * disable warnings for unused and unused but set variables since
+#   the stub declare variables as options or structs to get data from packets,
+#   but doesn't use it.
+# * disable warnings for unused functions because functions related
+#   to custom packets are implemented but not used
+# * disable warnings related to old-style-definition and strict-prototypes
+#   because we can't predict what fields would be used on custom packets,
+#   and they should be passed as args for some functions.
+	$(Q)$(TARGETCC) $(MOD_CFLAGS) \
+		-Wno-unused-variable -Wno-unused-but-set-variable \
+		-Wno-unused-function -Wno-old-style-definition -Wno-strict-prototypes \
+		$(NODE_TYPE_STUB_GEN_DIR)dummy.c -shared $(SOL_LIB_OUTPUT) \
+		-o $(NODE_TYPE_STUB_GEN_DIR)dummy.so
+
+PHONY += check-stub
+
+samples-check:
+	$(TEST_SAMPLES_DEPS_SCRIPT) --samples_root_dir $(top_srcdir)src/samples --samples_dependency_check_skip_list $(SAMPLES_DEPS_SCRIPT_BLACK_LIST)
+
+samples: samples-check $(SOL_LIB_OUTPUT) $(samples-out) $(PRE_GEN)
+
+PHONY += samples samples-check
+
+PRE_INSTALL := default_target $(all-mod-descs)
+EXTRA_FILES := $(NODE_TYPE_SCHEMA_DEST) $(BOARD_DETECT_DEST) $(GDB_AUTOLOAD_PY_DEST)
+
+ifeq (y,$(RPATH))
+rpath-bins := $(subst $(build_sysroot)/,$(DESTDIR),$(bins-out))
+
+rpath-bins-prepare = \
+	$(foreach bin,$(bins-out), \
+		$(eval $(bin)-install := $(subst $(build_sysroot)/,$(DESTDIR)/,$(bin))) \
+		$(eval all-rpath-bins += $($(bin)-install)-rpath-cleanup) \
+	) \
+
+$(eval $(call rpath-bins-prepare))
+
+define rpath-cleanup
+$($(1)-install)-rpath-cleanup: $(1) pre-install
+	@$(CHRPATH) -d $($(1)-install)
+endef
+$(foreach bin,$(bins-out),$(eval $(call rpath-cleanup,$(bin))))
+
+post-install: $(all-rpath-bins)
+endif
+
+pre-install: $(PRE_INSTALL)
+	$(Q)echo "     "INSTALLING SYSROOT TO: $(DESTDIR)/$(PREFIX)
+	$(Q)$(MKDIR) -p $(DESTDIR)/$(PREFIX)
+	$(Q)$(CP) -R $(build_sysroot)/$(PREFIX)/* $(DESTDIR)/$(PREFIX)
+
+post-install: pre-install
+
+install: post-install
+
+PHONY += install post-install pre-install
+
+ifeq (yyy,$(HAVE_DOXYGEN)$(HAVE_BZIP2)$(HAVE_TAR))
+$(DOXYGEN_GENERATED): $(DOXYGEN_RESOURCES) $(shell find $(top_srcdir)src/ -name '*.h' -type f)
+	$(Q)$(MKDIR) -p $(build_doxygen_targetdir)
+	$(Q)$(RM) $(build_doxygen_logfile)
+	$(Q)$(RM) $(build_doxygen_success)
+	$(Q)$(RM) -rf $(build_doxygen_targetdir)/*
+	$(Q) cat $(top_srcdir)doc/doxygen/examples_head.dox >> $(build_doxygen_targetdir)/examples.dox
+	$(Q) find $(top_srcdir)src/samples -type f -name *.c -printf "@example %h/%f\n" | sort >> $(build_doxygen_targetdir)/examples.dox
+	$(Q) cat $(top_srcdir)doc/doxygen/examples_foot.dox >> $(build_doxygen_targetdir)/examples.dox
+	$(Q)$(DOXYGEN) doc/doxygen/Doxyfile
+	$(Q) test `du $(build_doxygen_logfile) | cut -f1` -eq 0 || (echo "Failed to build doc" && cat $(build_doxygen_logfile) && exit 1)
+	$(Q) cd $(build_doxygen_targetdir)/html/; for i in `find . -name "_2src*.html"`; do mv $$i $${i#./_2}; done
+	$(Q) cd $(build_doxygen_targetdir)/html/; find . -name "*.html" -exec sed -i -e 's/_2src/src/g' {} \;
+	$(Q) touch $(build_doxygen_success)
+
+
+$(build_doxygendir)$(PACKAGE_DOCNAME).tar.bz2: $(DOXYGEN_GENERATED)
+	$(Q)$(RM) -f $(build_doxygendir)$(PACKAGE_DOCNAME).tar.bz2
+	$(Q)$(TAR) cfj $(build_doxygendir)$(PACKAGE_DOCNAME).tar.bz2 -C $(build_doxygendir) $(PACKAGE_DOCNAME)
+
+doxygen: $(build_doxygendir)$(PACKAGE_DOCNAME).tar.bz2
+else
+doxygen:
+	$(Q)echo "     ERROR: Make sure to have bzip2, tar and doxygen installed and reconfigure"
+endif
+
+PHONY += doxygen
+
+doc: cheat-sheet doxygen
+
+PHONY += doc
+
+ifeq (yyy,$(FBP_TO_DOT)$(HAVE_GRAPHVIZ)$(HAVE_IMAGEMAGICK))
+cheat-sheet: $(MAKEFILE_GEN) $(CHEAT_SHEET_HTML_SCRIPT) $(CHEAT_SHEET_RESOURCES) $(SOL_FBP_TO_DOT_BIN) $(all-mod-descs)
+	$(Q)echo "     "GEN"   "$(CHEAT_SHEET_INDEX_HTML)
+	$(Q)$(GEN_SVG_SCRIPT) "$(abspath $(SOL_FBP_TO_DOT_BIN))" $(SVG_OUTPUT_DIR)
+	$(Q)$(CHEAT_SHEET_HTML_SCRIPT) $(CHEAT_SHEET_INDEX_HTML_IN) $(CHEAT_SHEET_INDEX_HTML) $(SVG_OUTPUT_DIR) $(sort $(all-mod-descs))
+	$(Q)$(CP) -Rf doc/node-types-html/js/ $(build_docdir)node-types-html/
+	$(Q)$(CP) -Rf doc/node-types-html/css/ $(build_docdir)node-types-html/
+	$(Q)$(CP) -Rf doc/node-types-html/images/ $(build_docdir)node-types-html/
+else
+cheat-sheet:
+	$(Q)echo "     Either no sol-fbp-to-dot built, or no graphviz or imagemagick installed in the host system"
+	$(Q)echo "     If lacking graphviz or imagemagick, after installing it run: make reconf"
+endif
+
+PHONY += cheat-sheet
+
+ifneq ($(USE_NODEJS),)
+
+bins-out += $(build_stagedir)/bindings-nodejs.stamp
+NODE_GYP ?= $(NODE_GYP_PATH)/node-gyp
+
+$(build_stagedir)/bindings-nodejs.stamp: $(SOL_LIB_OUTPUT) $(shell find bindings/nodejs/src -type f)
+	$(Q) $(NODEJS_NPM) install --ignore-scripts --production
+
+	$(Q) \
+		SOL_CONFIG_OIC=$(OIC) \
+		SOL_CONFIG_USE_GPIO=$(USE_GPIO) \
+		SOL_CONFIG_USE_AIO=$(USE_AIO) \
+		SOL_CONFIG_USE_UART=$(USE_UART) \
+		SOL_CONFIG_USE_PWM=$(USE_PWM) \
+		SOL_CONFIG_USE_SPI=$(USE_SPI) \
+		SOL_CONFIG_USE_I2C=$(USE_I2C) \
+		SOL_CONFIG_NETWORK=$(NETWORK) \
+			$(NODEJS) bindings/nodejs/configure-bindings.js
+
+	$(Q) ( \
+		export SOLETTA_CFLAGS="$(addprefix -I,$(abspath $(HEADERDIRS)))"; \
+		export SOLETTA_LIBS="$(FIND_LIBRARY_LDFLAGS)"; \
+			$(NODE_GYP) configure && $(NODE_GYP) build )
+
+	$(Q) mkdir -p $(build_nodejs_bindingsdir)
+	$(Q) cp -a *js package.json $(build_nodejs_bindingsdir)
+	$(Q) mkdir -p $(build_nodejs_bindingsdir)/build
+	$(Q) cp $$(find build -type f -name soletta.node | grep -v 'soletta_sysroot' | head -n 1) \
+		$(build_nodejs_bindingsdir)/build
+	$(Q) mkdir -p $(build_nodejs_bindingsdir)/node_modules
+	$(Q) cp -a ./node_modules/* $(build_nodejs_bindingsdir)/node_modules
+
+	$(Q) touch $(build_stagedir)/bindings-nodejs.stamp
+
+check-bindings-nodejs: $(build_stagedir)/bindings-nodejs.stamp
+	$(Q) $(NODEJS_NPM) install --ignore-scripts
+	$(Q) $(NODEJS) $(NODEJS_ROOT)/tests/suite.js --ldPreload="$(LIB_ASAN_PATH)" \
+		--testList="Load Library.js,Main Loop Interruption.js,Main Loop Interruption No Cleanup.js,Simple Platform APIs.js"
+PHONY += check-bindings-nodejs
+
+endif #neq($(USE_NODEJS),)
+
+DEFAULT_ALIAS_FILE := $(build_aliasesdir)/50-default.json
+
+ifeq (y,$(USE_FLOW))
+gen-aliases: $(FLOW_NODE_TYPE_ALIAS)
+	$(Q)$(MKDIR) -p $(build_aliasesdir)
+	$(Q)echo "     "GEN"   "$(DEFAULT_ALIAS_FILE)
+	$(Q)$(FLOW_NODE_TYPE_ALIAS) --output=$(DEFAULT_ALIAS_FILE) $(all-gens)
+endif
