@@ -21,3 +21,8 @@ config ECHO_CLIENT_SAMPLE
 config NETCTL_SAMPLE
 	bool "Network control"
 	depends on NETWORK_SAMPLES && NETCTL
+
+config DPS_IIO_SAMPLE
+        bool "DPS IIO control"
+        depends on NETWORK_SAMPLES && NETCTL
+        default y

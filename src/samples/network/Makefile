@@ -11,3 +11,6 @@ sample-$(NETCTL) += netctl
 sample-netctl-$(NETCTL) := netctl.c
 sample-netctl-$(NETCTL)-deps := lib/comms/sol-netctl-impl-connman.o
 
+sample-$(DPS_IIO_SAMPLE) += dps_iio
+sample-dps_iio-$(DPS_IIO_SAMPLE) := dps_iio.c
+
